@@ -81,13 +81,26 @@ const body = req => new Promise(r => { let b = ''; req.on('data', c => { b += c;
   page.on('pageerror', e => errors.push(e.message));
 
   await page.goto(dtmsBase + '/dtms/index.php?task=41&id=R');
+  // An older panel left open on the page must be replaced, not merely toggled.
+  await page.evaluate(() => {
+    const old = document.createElement('div');
+    old.id = 'dtms-batch-panel';
+    old.setAttribute('data-version', '0.1.0');
+    old.textContent = 'old panel';
+    document.body.appendChild(old);
+  });
   const bm = fs.readFileSync(path.join(__dirname, '..', 'dist', 'bookmarklet.txt'), 'utf8').trim();
   await page.evaluate(code => (0, eval)(code), decodeURIComponent(bm.slice('javascript:'.length)));
   const panel = page.locator('#dtms-batch-panel');
   const msg = () => panel.locator('#msg').textContent();
 
+  const version = require('../package.json').version;
+  assert.equal(await page.locator('#dtms-batch-panel').count(), 1);
+  assert.equal(await page.locator('#dtms-batch-panel').getAttribute('data-version'), version);
+  assert.match(await panel.locator('.hd').textContent(), new RegExp('v' + version.replace(/\./g, '\\.')));
   assert.equal(await panel.locator('#loadq').isVisible(), false, 'Load queue hidden until configured');
-  await panel.locator('summary', { hasText: 'Settings' }).click();
+  await panel.locator('#connect').click();
+  assert.equal(await panel.locator('#qurl').isVisible(), true, 'Connect opens Settings at the URL field');
   await panel.locator('#qurl').fill(queueUrl);
   await panel.locator('#qtoken').fill('wrong-token');
   await panel.locator('#qtest').click();
@@ -97,6 +110,7 @@ const body = req => new Promise(r => { let b = ''; req.on('data', c => { b += c;
   await page.waitForFunction(() => /Queue reachable/.test(document.getElementById('dtms-batch-panel').shadowRoot.getElementById('msg').textContent));
   await panel.locator('#save').click();
   assert.equal(await panel.locator('#loadq').isVisible(), true);
+  assert.equal(await panel.locator('#connect').isVisible(), false);
 
   await panel.locator('#inp').fill('20261021004 JE04\n');
   await panel.locator('#loadq').click();

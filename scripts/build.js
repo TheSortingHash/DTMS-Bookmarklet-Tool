@@ -29,7 +29,7 @@ function squeeze(code) {
   return out.join('\n');
 }
 
-const tool = banner + src('core.js') + '\n' + src('queue.js') + '\n' + src('panel.js');
+const tool = banner + src('core.js') + '\n' + src('queue.js') + '\n' + src('panel.js').replace(/__VERSION__/g, version);
 const probe = banner + src('core.js') + '\n' + src('probe.js');
 const bookmarklet = 'javascript:' + encodeURIComponent('(function(){' + squeeze(tool) + '\n})();void 0');
 

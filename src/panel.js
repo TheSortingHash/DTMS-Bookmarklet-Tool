@@ -9,10 +9,15 @@
   var core = window.DTMSCore;
   var queueApi = window.DTMSQueue;
   var HOST_ID = 'dtms-batch-panel';
+  var VERSION = '__VERSION__'; // replaced by scripts/build.js
   var SETTINGS_KEY = 'dtmsBatch.settings';
 
   var existing = document.getElementById(HOST_ID);
-  if (existing) { existing.style.display = existing.style.display === 'none' ? '' : 'none'; return; }
+  if (existing && existing.getAttribute('data-version') === VERSION) {
+    existing.style.display = existing.style.display === 'none' ? '' : 'none';
+    return;
+  }
+  if (existing) existing.remove(); // an older version is open on this page: replace it
 
   if (!/\/dtms\//i.test(location.pathname)) {
     alert('DTMS Batch: open a DTMS page (http://192.168.1.220/dtms/...) first, then click the bookmarklet.');
@@ -39,6 +44,7 @@
 
   var host = document.createElement('div');
   host.id = HOST_ID;
+  host.setAttribute('data-version', VERSION);
   host.style.cssText = 'position:fixed;top:12px;right:12px;z-index:2147483647;';
   document.body.appendChild(host);
   var root = host.attachShadow({ mode: 'open' });
@@ -50,7 +56,7 @@
     '  font:13px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;border:1px solid #2C2C87;',
     '  border-radius:8px;box-shadow:0 8px 28px rgba(0,0,0,.25);overflow:hidden}',
     '.hd{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#2C2C87;color:#fff}',
-    '.hd b{font-size:14px}.hd .st{opacity:.85;font-size:12px;flex:1}',
+    '.hd .ver{font-size:11px;opacity:.7}.hd b{font-size:14px}.hd .st{opacity:.85;font-size:12px;flex:1}',
     '.hd button{background:transparent;border:0;color:#fff;font-size:16px;cursor:pointer;padding:0 4px}',
     '.bd{padding:10px 12px;overflow:auto;display:flex;flex-direction:column;gap:8px}',
     'textarea{width:100%;box-sizing:border-box;min-height:96px;font:13px/1.4 ui-monospace,Consolas,monospace;',
@@ -73,11 +79,12 @@
     'pre{max-height:140px;overflow:auto;background:#f9fafb;border:1px solid #e5e7eb;padding:6px;font-size:11px;margin:4px 0 0}',
     '</style>',
     '<div class="p">',
-    ' <div class="hd"><b>DTMS Batch</b><span class="st" id="st"></span>',
+    ' <div class="hd"><b>DTMS Batch</b><span class="ver">v' + VERSION + '</span><span class="st" id="st"></span>',
     '  <button id="min" title="Hide (click the bookmarklet again to show)">–</button></div>',
     ' <div class="bd">',
     '  <div class="row"><label>Default destination <select id="dest"></select></label>',
-    '   <button class="b" id="loadq" hidden title="Add pending items from the Google Sheet queue">Load queue</button></div>',
+    '   <button class="b" id="loadq" hidden title="Add pending items from the Google Sheet queue">Load queue</button>',
+    '   <button class="b" id="connect" hidden title="Enter the web app URL and token">Connect Google Sheet</button></div>',
     '  <textarea id="inp" spellcheck="false" placeholder="One PC No. per line, optionally followed by a station code:\n20261021033 JD00\n20261021037          (uses the default destination)\n\nCtrl+Enter = Check"></textarea>',
     '  <div class="row">',
     '   <button class="b" id="check">Check (read-only)</button>',
@@ -95,7 +102,7 @@
     '   <button class="b pri" id="sync" hidden>Sync to Sheet</button>',
     '  </div>',
     '  <details><summary>Log</summary><pre id="log"></pre></details>',
-    '  <details><summary>Settings</summary>',
+    '  <details id="settings"><summary>Settings</summary>',
     '   <div class="hint">Station names that mean <i>us</i> (one per line). "Not yet received by" any of these is fixed by receiving.</div>',
     '   <textarea id="aliases" style="min-height:48px"></textarea>',
     '   <div class="row"><label>Delay between requests (ms) <input id="delay" type="number" min="0" step="50" style="width:80px"></label></div>',
@@ -113,7 +120,7 @@
     st: $('st'), dest: $('dest'), inp: $('inp'), check: $('check'), run: $('run'), stop: $('stop'),
     sum: $('sum'), msg: $('msg'), tblwrap: $('tblwrap'), tb: $('tb'), after: $('after'), csv: $('csv'),
     logcsv: $('logcsv'), reload: $('reload'), log: $('log'), aliases: $('aliases'), delay: $('delay'), save: $('save'),
-    loadq: $('loadq'), sync: $('sync'), qurl: $('qurl'), qtoken: $('qtoken'), qtest: $('qtest')
+    loadq: $('loadq'), connect: $('connect'), settings: $('settings'), sync: $('sync'), qurl: $('qurl'), qtoken: $('qtoken'), qtest: $('qtest')
   };
 
   var station = core.parseStation(document) || '?';
@@ -152,7 +159,7 @@
     return settings.queueUrl && settings.queueToken
       ? queueApi.createQueueClient(settings.queueUrl, settings.queueToken) : null;
   }
-  function showQueueUi() { el.loadq.hidden = !queue(); }
+  function showQueueUi() { el.loadq.hidden = !queue(); el.connect.hidden = !!queue(); }
   showQueueUi();
 
   function inputKey() { return el.dest.value + '\u0000' + el.inp.value; }
@@ -398,6 +405,11 @@
 
   el.check.addEventListener('click', doCheck);
   el.loadq.addEventListener('click', loadQueue);
+  el.connect.addEventListener('click', function () {
+    el.settings.open = true;
+    el.qurl.scrollIntoView({ block: 'center' });
+    el.qurl.focus();
+  });
   el.sync.addEventListener('click', syncReport);
   el.qtest.addEventListener('click', function () {
     var url = el.qurl.value.trim(), token = el.qtoken.value.trim();

@@ -1,6 +1,6 @@
 {
   "name": "dtms-bookmarklet-tool",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Batch receive and forward for the DAP Document Tracking and Monitoring System",
   "scripts": {
