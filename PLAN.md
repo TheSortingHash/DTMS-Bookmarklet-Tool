@@ -1,6 +1,6 @@
 # DTMS Batch Receive & Forward Tool — Plan
 
-Status: **v2 draft**. Revised with the answers from 2026-10-27. No code yet.
+Status: **v3**. Phases 0 and 1 are built and tested against fixtures of the real DTMS pages, awaiting a live trial.
 The DTMS system administrator has approved front-end automation.
 
 ## 1. Problem
@@ -179,21 +179,24 @@ The destination list comes from DTMS's own `ilocate` options: read live by the b
 
 `LockService` wraps writes so the phone and the desk can write at the same time.
 
-**Access, and the catch.** Deploy as *Execute as: me · Who has access: anyone within DAP*. That works well for the **phone scanner page**: it opens on `script.google.com` while signed in to Workspace, and `google.script.run` handles authentication.
+**Access (decided 2026-10-27).** DAP's Workspace allows web apps shared with *Anyone*, so there are two deployments of the same script:
 
-The **bookmarklet** is different. It runs on `192.168.1.220`, and browsers increasingly refuse to send Google login cookies on cross-site `fetch` calls, so a domain-restricted web app would redirect it to a login page. Options, in order of preference:
+| Deployment | Who has access | Used by | Why |
+|---|---|---|---|
+| **API** | *Anyone* + a secret token (Script Properties) | Bookmarklet on `192.168.1.220` | Cross-site `fetch` from the LAN page can't rely on Google login cookies, so the token authenticates instead. GETs return JSON (JSONP fallback); POSTs send `text/plain` JSON to avoid a CORS preflight. |
+| **Scanner** | *Anyone within DAP* | Phone browsers | Opens first-party on `script.google.com`, so `Session.getActiveUser()` gives `scannedBy` with no extra login. |
 
-1. **Popup bridge.** The bookmarklet opens a small web-app window (first-party, so you're signed in) and exchanges data with it via `postMessage`. Keeps "DAP only" access. *Needs a spike* to confirm `postMessage` works through Apps Script's sandbox iframe.
-2. **Separate "Anyone" deployment** with a secret token for the bookmarklet's endpoints only. Simple and reliable, but your Workspace admin may have disabled "Anyone" access. The Sheet holds only PC Nos. and statuses.
-3. **No live link.** The bookmarklet imports and exports via the clipboard (copy pending as text, paste results). Always works and is clunkier.
+The Sheet holds only PC Nos., destination codes and statuses, so the token-protected API exposes nothing sensitive if the token leaks. The token can be rotated in Script Properties at any time.
+
+The popup bridge (bookmarklet opens a web-app window and talks to it via `postMessage`) stays as a fallback, in case the *Anyone* deployment is ever restricted.
 
 ## 8. Phases
 
 | Phase | Deliverable | Needs Google? |
 |---|---|---|
-| **0. Probe** | Read-only console snippet: parses the task=41 list and the pre-check page for 1–2 PC Nos., and prints what the tool *would* do. Confirms the parsers against live pages. | No |
-| **1. Desk panel** | Bookmarklet: paste `PCN [DEST]` lines → dry-run table → Run (receive → forward → retry) → summary + CSV log | No |
-| **2. Queue** | Sheet + Apps Script; the panel pulls and reports (bridge per §7) | Yes |
+| **0. Probe** ✅ built | Read-only console snippet (`dist/probe-console.js`): parses the task=41 list and the pre-check page for the PC Nos. you enter, and prints what the tool *would* do. Confirms the parsers against live pages. | No |
+| **1. Desk panel** ✅ built | Bookmarklet (`dist/install.html`): paste `PCN [DEST]` lines → Check table → Run (receive → forward → retry) → summary + CSV log | No |
+| **2. Queue** | Sheet + Apps Script; the panel pulls and reports (API deployment per §7) | Yes |
 | **3. Phone scanner** | Web app page: sticky destination, manual entry, OCR + confirm | Yes |
 | **4. (optional) QR** | DV-page script that adds a QR beside the PC No. | Accounting buy-in |
 
@@ -203,9 +206,9 @@ The **bookmarklet** is different. It runs on `192.168.1.220`, and browsers incre
 
 1. **Receive success page.** Phase 1 verifies receipts by re-reading the list, so the exact HTML after `YES!` isn't required. A saved copy would still help.
 2. **Is an item at "OMD-Finance Signatory (Not yet Received)" in *our* task=41 list?** The design assumes yes, since it's the same station. The probe confirms it.
-3. **Popup bridge** (§7 option 1). Spike in Phase 2.
-4. **OCR accuracy** on worn or photocopied DVs. Test on about 20 real vouchers in Phase 3. Manual entry and Live Text/Lens are the fallback.
-5. **Session timeout** mid-batch. Detect the login page and stop. A rerun skips items already done (pre-check).
+3. **OCR accuracy** on worn or photocopied DVs. Test on about 20 real vouchers in Phase 3. Manual entry and Live Text/Lens are the fallback.
+4. **Session timeout** mid-batch. *Handled.* DTMS silently serves its login page ("DTMS User Registry", `input[name=password]`). The tool detects it on every response, stops, and tells you to log in. A rerun skips items already done (pre-check).
+5. **POST target.** Updates go to `index.php?task=3` and receipts to `index.php?task=41&id=R`. These are the same URLs the forms post to when used by hand from the menu. Phase 0 confirms them on the live system.
 
 ## 10. Resolved decisions (2026-10-27)
 
@@ -218,8 +221,10 @@ The **bookmarklet** is different. It runs on `192.168.1.220`, and browsers incre
 | Google account | **DAP Workspace** |
 | Phones | **Android and iPhone** |
 | Admin approval | **Yes**, front-end automation only |
+| Web app access | **Anyone** allowed. API deployment uses Anyone + token; scanner uses DAP-only. |
+| Session expiry | Silently shows the login page. Detected by title / password field. |
 
-## 11. Still open
+## 11. Next
 
-- Phase 2 access route (§7): is "Anyone" access allowed for web apps in DAP's Workspace? If you don't know, we spike the popup bridge first.
-- Sample HTML of the DTMS **login / session-expired** page, so the tool can recognise it.
+- **Live trial of Phase 0, then Phase 1**, on a handful of real vouchers (see README).
+- Then Phase 2 (Sheet + Apps Script queue).
