@@ -1,120 +1,149 @@
 # DTMS Batch Receive & Forward Tool — Plan
 
-Status: **draft for review**. No code yet.
+Status: **v2 draft**. Revised with the answers from 2026-10-27. No code yet.
+The DTMS system administrator has approved front-end automation.
 
 ## 1. Problem
 
 For every physical voucher that arrives at OMD-Finance today, the routine is:
 
 1. **Receive** (`index.php?task=41&id=R`): find the PC No. in a list of 40+ rows, tick its `ACK` box, repeat, then click `YES!` (`name="iReceive"`).
-2. **Forward** (`index.php?task=3`): type the PC No. into `ipcn`, click `Search`, pick a station in `ilocate`, click `Update Location` (`name="iUpdate"`). Do this once per PC No.
-3. **Handle failures**: if the search shows *"Documents were not yet received by …"*, receive the document first and then forward it again.
+2. **Forward** (`index.php?task=3`): type the PC No. into `ipcn`, choose the destination in `ilocate`, click `Update Location` (`name="iUpdate"`). Do this once per PC No., and the **destination differs per voucher**.
+3. **Handle failures**: if `Update Location` returns *"Oops…. Documents were not yet received by …"*, receive the document first and forward it again.
 
-Goal: capture a batch of PC Nos. once (by scan or typing) and let a tool do the ticking, receiving, forwarding and retrying. Every action is logged.
+Goal: capture a batch of `PC No. → destination` pairs once (by scan or typing) and let a tool do the ticking, receiving, forwarding and retrying, with every action logged.
 
 ## 2. The constraint that shapes the design
 
-DTMS lives at `http://192.168.1.220`, a **private LAN address over plain HTTP**. Google Apps Script runs on Google's servers, so it **cannot reach DTMS**. `UrlFetchApp` will never see that IP.
-
-So the work is split:
+DTMS lives at `http://192.168.1.220`, a **private LAN address over plain HTTP**. Google Apps Script runs on Google's servers, so it **cannot reach DTMS**.
 
 | Piece | Runs where | Job |
 |---|---|---|
-| **Bookmarklet** | Your desktop browser, on the DTMS page (same origin, uses your existing login session) | Every DTMS interaction: reading lists, receiving, forwarding, detecting errors, retrying |
-| **Apps Script web app** | Google | A small JSON API over the Sheet: add scans, list pending items, record results |
-| **Google Sheet** | Google | Temporary database: the queue plus an append-only log |
-| **Scanner page** (phone) | Phone browser | Captures PC Nos. and posts them to the queue |
+| **Bookmarklet** | Desktop browser, on the DTMS page (same origin, existing login session) | Every DTMS interaction |
+| **Apps Script web app** | Google (DAP Workspace) | Queue API over the Sheet |
+| **Google Sheet** | Google (DAP Workspace) | Temporary database: queue + append-only log |
+| **Scanner page** | Android / iPhone browser | Captures `PC No. + destination` into the queue |
 
-Only the browser talks to DTMS. Google never needs network access to 192.168.1.220, and DTMS credentials never leave your browser.
+Only the browser talks to DTMS. DTMS credentials never leave it.
 
 ## 3. Architecture
 
 ```
- Phone (scan / OCR / type)            Desktop browser on 192.168.1.220
- ┌───────────────────────┐            ┌──────────────────────────────────┐
- │ Scanner page           │            │ DTMS page + bookmarklet panel    │
- │  - camera → PC No.     │            │  1. pull PENDING from queue      │
- │  - validate format     │            │  2. RECEIVE  (task=41)           │
- │  - choose destination  │            │  3. FORWARD  (task=3) per PCN    │
- └──────────┬────────────┘            │  4. retry "not yet received"     │
-            │ POST scans               │  5. push results + log           │
+ Phone (scan / type)                   Desktop browser on 192.168.1.220
+ ┌────────────────────────┐            ┌──────────────────────────────────┐
+ │ Scanner page            │            │ DTMS page + bookmarklet panel    │
+ │  - sticky destination   │            │  1. pull PENDING from queue      │
+ │  - camera/OCR → PC No.  │            │  2. RECEIVE  (task=41, 1 POST)   │
+ │  - confirm → enqueue    │            │  3. FORWARD  (task=3, per PCN)   │
+ └──────────┬─────────────┘            │  4. retry "not yet received"     │
+            │                          │  5. push results + log           │
             ▼                          └──────────────┬───────────────────┘
- ┌──────────────────────────────────────────────────▼─┐
- │ Apps Script web app (doGet/doPost) ── Google Sheet │
- │   Queue tab   |   Log tab   |   Stations tab       │
- └────────────────────────────────────────────────────┘
+ ┌───────────────────────────────────────────────────▼┐
+ │ Apps Script web app ── Google Sheet                 │
+ │   Queue   |   Log   |   Stations                    │
+ └─────────────────────────────────────────────────────┘
 ```
 
-The desktop panel also has its own input box, so you can type or paste PC Nos. directly when the phone isn't in use. **Phase 1 needs no Google pieces at all** (see §8).
+The desktop panel has its own input box, so **Phase 1 runs with no Google pieces at all** (§8).
 
 ## 4. How the bookmarklet drives DTMS
 
 **Approach: replay the forms with `fetch()` instead of clicking through pages.**
 
-A bookmarklet's script is lost whenever the page navigates. Clicking `Search` or `YES!` triggers a navigation and kills the loop. Instead, the bookmarklet stays on one page and:
+A bookmarklet's script is lost when the page navigates. So the tool stays on one DTMS page and:
 
-- `GET`s the DTMS pages with `fetch` (same origin, so the PHP session cookie is sent automatically);
-- parses the returned HTML with `DOMParser`;
-- builds the POST body **from the page's own `<form>`** using `new FormData(form)`, then adds the button that was "clicked" (`iReceive=YES!`, `iSearch=Search`, `iUpdate=Update Location`).
+- sends requests with `fetch` (same origin, so the PHP session cookie goes along automatically);
+- parses responses with `DOMParser`;
+- builds each POST **from the page's own `<form>`** with `new FormData(form)`, then adds the button that was "clicked". The request then matches what the browser itself sends, including every hidden field (`task`, `iSelecttype`, `act`, `ipart`, `code[]`, `refind`, `status`).
 
-Taking the real form as the starting point means the request matches what the browser itself would send, hidden fields included (`task`, `iSelecttype`, `act`, `ipart`, `code[]`, `refind`, `status`). That matters because the receive form has both a hidden `act` and `act[1]`, `act[2]`, …, and the safest choice is to send exactly what DTMS already receives today.
+### 4.1 Your station and its alias
 
-### 4.1 Receive (task=41)
+`OMD-Finance Department` (the header's "Station: …") and `OMD-Finance Signatory` (`ilocate` code `JE05`) are **the same station**. "Signatory" only indicates status. The tool keeps a configurable alias list:
 
-1. `GET index.php?task=41&id=R` and parse the rows. In each `<tr>`, the 3rd cell (`td.mnu4`) holds the PC No. and the 2nd cell holds `input[type=checkbox][name^="act["]`. This gives a map `PCN → "act[17]"`.
-   - The `act[n]` numbers are **row positions, not IDs**, so the map is rebuilt from a fresh GET every time.
-2. Sort the batch:
-   - **found**: tick it;
-   - **not in list**: either already received, or not yet forwarded to us. Step 3 of forwarding tells the two apart.
-3. Submit the form with only the found boxes ticked, plus `iReceive=YES!`.
-4. **Verify**: GET the list again. Received PC Nos. should be gone. Anything still listed is marked `RECEIVE_FAILED`.
+```js
+MY_STATION_ALIASES = ["OMD-Finance Department", "OMD-Finance Signatory"]
+```
 
-### 4.2 Forward (task=3), one PC No. at a time
+Anything *"not yet received by"* one of these names is ours to fix by receiving. Any other station name means someone else has to receive it, so the item is marked `BLOCKED`.
 
-1. POST the search: `task=3, ipcn=<PCN>, iSearch=Search`.
-2. Parse the response:
-   - **"Oops…"** block present → read the second `<p>`: *"Documents were not yet received by `<Station>`!"*
-     - `<Station>` is **our station** (from the "Station: …" header) → put the PC No. on the **retry list**.
-     - `<Station>` is **another station** → mark it `BLOCKED` with the message. We can't fix it; someone at that station has to receive it first.
-   - Otherwise read `Last Location`, and confirm the `ilocate` select contains the destination code.
-3. POST the update, built from the returned form: `ilocate=<code>`, `iUpdate=Update Location`, `reason` empty, `close` left unticked.
-4. Parse the result for a success marker (**sample needed**, see §10). If it isn't there, mark it `FORWARD_FAILED` and save a snippet of the page text in the log.
+### 4.2 Receive (task=41)
 
-### 4.3 Retry loop
+1. `GET index.php?task=41&id=R` and parse the rows. In each row, the 3rd cell (`td.mnu4`) holds the PC No. and the 2nd cell holds `input[type=checkbox][name^="act["]`. This gives a map `PCN → "act[n]"`. The `act[n]` numbers are **row positions, not IDs**, so the map is rebuilt from a fresh GET every time.
+2. Tick only the batch's PC Nos. that appear in the list, then POST the form once with `iReceive=YES!`.
+3. **Verify**: GET the list again. Received PC Nos. should be gone. Anything still listed is marked `RECEIVE_FAILED`.
+
+PC Nos. that are not in the list aren't errors at this point. Most will already be received and are simply forwarded in §4.3.
+
+### 4.3 Forward (task=3), one PC No. at a time
+
+Each PC No. is handled in two requests: a read-only pre-check, then the update.
+
+**a) Pre-check (read-only).** `GET index.php?task=3&iSearch=Search&ipcn=<PCN>`. This is the URL route you gave, and it opens the update page with the PC No. already loaded. Parse:
+- `Client Name`, `Amount` (shown in the panel only, never stored in Google)
+- `Last Location`, e.g. `OMD-Administrative Department (Not yet Received)`
+- the **current location code**: the `selected` option placed *after* the `--------------------` separator in `ilocate` (e.g. `JD00`)
+- whether the destination code exists in `ilocate`
+
+Then decide:
+
+| Pre-check shows | Action |
+|---|---|
+| Current location == destination | Already forwarded. Mark `FORWARDED` and skip (makes reruns safe). |
+| Last Location is one of our aliases **and** `(Not yet Received)` | Needs receiving. Add to the receive set and skip the update for now. |
+| No record / empty page | `NOT_FOUND` |
+| Destination code not in `ilocate` | `FAILED: bad destination` |
+| Otherwise | Go to (b) |
+
+**b) Update.** POST the form from the pre-check page with `ilocate=<destCode>` and `iUpdate=Update Location`. `close` stays unticked and `reason` stays empty. This matches your manual shortcut (PC No. + dropdown + Update Location), and also sends the `refind` and `status` hidden fields DTMS put on the page.
+
+**c) Verify** from the response. This uses the success page you shared:
+- **Success** = no "Oops", **and** `Last Location` starts with the destination's label followed by `(Not yet Received)`, **and** the selected option after the separator equals `destCode`.
+- **"Documents were not yet received by `<X>`!"**:
+  - `<X>` is in our aliases → add to the retry set.
+  - otherwise → `BLOCKED`.
+- Any other "Oops" text or unexpected page → `FAILED`, with a snippet of the page text saved in the log.
+
+### 4.4 Batch flow and retry loop
 
 ```
-for attempt in 1..2:
-    retry = forward(all pending)              # collects "not yet received by ME"
+receive(batch ∩ receive-list)                     # §4.2, one POST
+for pcn in batch: forward(pcn)                    # §4.3, pre-check + update
+for attempt in 1..2:                              # safety net
+    retry = items flagged "needs receiving" or "not yet received by ME"
     if retry is empty: break
-    receive(retry)                            # §4.1 on just those PC Nos.
-    pending = retry
+    receive(retry); forward(retry)
 anything still in retry → BLOCKED("not yet received after 2 attempts")
 ```
 
-Requests run **one at a time** with a short delay of about 300 ms. This is an old PHP app, and we shouldn't load it harder than a fast human would.
+Requests run **one at a time**, about 300 ms apart.
 
-### 4.4 Safety rails
+### 4.5 Safety rails
 
-- **Dry-run first.** The panel shows the plan (found / not found / destination per PC No.) and does nothing until you click **Run**.
-- **Your own station only.** The "Station: …" header is read and saved with each log entry. The run stops if the page isn't logged in.
-- **Never ticks "CLOSE Transaction"** and never fills `reason`. Forwarding back to the requestor stays manual in v1.
-- **Validates the destination.** The destination code must exist in that page's `ilocate` options, or the item is skipped.
-- **Stops on anything unexpected**, such as a login page, an unknown layout, or an HTTP error. A half-finished batch is never resubmitted blindly.
-- **Idempotent queue.** Each item moves `PENDING → RECEIVED → FORWARDED`, and a rerun skips work already done.
+- **Dry-run first.** The panel lists every PC No. with its payee, amount, current location → destination, and planned action. Nothing is sent until you click **Run**.
+- **Session check.** It reads the "Station: …" header before starting and before each step. A login page or a different station stops the run.
+- **Never ticks "CLOSE Transaction"** and never fills `reason`. Close and return-to-requestor stay manual in v1.
+- **Stops on anything unexpected**, and never resubmits a half-finished batch blindly. The pre-check makes reruns safe.
+- **Visible progress** per row (⏳ / ✅ / ⚠️ / ⛔), plus a log you can download as CSV.
 
-## 5. Capturing PC Nos.: QR injection vs. phone camera
+## 5. Capturing `PC No. + destination`
 
-The PC No. is 11 digits in the form `YYYYMMDD` + 3-digit sequence (`20261021037`). That format allows real validation: a plausible date plus a sequence, regex `^20\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d{3}$`.
+**PC No. format**: 11 digits, `YYYYMMDD` + a 3-digit sequence. Validated with `^20\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d{3}$`.
 
-**Recommendation: phone OCR of the printed PC No. as the main path, with QR as an optional upgrade.**
+**Destination UX** (it varies per voucher): a **sticky destination picker**. You choose "OMD-Administrative Department", scan or type several vouchers, switch to "Pre-Audit", and scan more. Each item stores its own `destCode`. Desk input accepts lines like:
 
-- **Why not lead with QR injection.** The DV (`/ifmis/jevadjust/budget/reports/dvoucher1.php?busno=…&jevno=…&ref=dv1`) is generated and printed by **Accounting**, not OMD-Finance. Your photo is of a voucher that's already printed. A QR only appears if whoever prints the DV runs a userscript or bookmarklet first. That adds a step to another unit's routine, and it doesn't help with vouchers already in circulation. It's worth proposing to Accounting later. Injecting it is easy: find the `PC No:` cell, render a QR next to it, then print.
-- **Phone OCR.** It works on every voucher already printed, today. The scanner page frames the PC No. box, runs OCR with digits only, extracts `20\d{9}` and checks it with the regex above. A quick human check covers the rest. **You confirm each read with one tap**, so a misread digit never reaches DTMS.
-- **Always available:** a numeric input on the phone and the desktop panel. A USB or Bluetooth barcode scanner also works, since it acts as a keyboard, if QR is adopted later.
+```
+20261021033 JD00
+20261021037            ← uses the currently selected default destination
+```
 
-The scanner page also asks for a **destination per batch** (for example, "OMD-Finance Signatory `JE05`"), with an optional per-item override.
+The destination list comes from DTMS's own `ilocate` options: read live by the bookmarklet, and copied to the Sheet's **Stations** tab for the phone.
 
-**Hosting the scanner page.** Camera access inside Apps Script's sandboxed HtmlService iframe is unreliable, especially on iOS. The safer choice is to host the scanner page as a static file on GitHub Pages from this repo, posting to the Apps Script web app. A spike will check whether Apps Script hosting works on your phones (§9).
+**Capture methods**, in rollout order:
+
+1. **Typing or pasting at the desk** (Phase 1). No setup.
+2. **Phone, with your own camera app** (zero-dev fallback). iPhone Live Text and Google Lens on Android can both copy the number off the printed DV. Paste it into the scanner page's input.
+3. **Phone, scanning inside the page** (Phase 3). Tesseract.js OCR with a digit whitelist reads the `PC No:` box, extracts `20\d{9}`, validates it, and **you confirm with one tap**. Works on Android Chrome and iPhone Safari.
+4. **QR on the DV** (optional Phase 4). Only if Accounting, who generate and print the DVs, agree to run a small script on `dvoucher1.php` before printing. It would add a QR next to the `PC No:` cell. Then any phone camera, or a cheap USB scanner, reads it instantly.
 
 ## 6. Google Sheet schema
 
@@ -123,62 +152,74 @@ The scanner page also asks for a **destination per batch** (for example, "OMD-Fi
 | Column | Example | Notes |
 |---|---|---|
 | `id` | `q_1730000000_ab12` | unique |
-| `batchId` | `2026-10-27-AM` | groups one stack of vouchers |
-| `pcn` | `20261021037` | validated 11 digits |
-| `action` | `RECEIVE_FORWARD` | `RECEIVE` / `FORWARD` / `RECEIVE_FORWARD` |
-| `destCode` | `JE05` | `ilocate` option value |
-| `status` | `PENDING` | `PENDING / RECEIVED / FORWARDED / BLOCKED / FAILED` |
+| `batchId` | `2026-10-27-PM` | |
+| `pcn` | `20261021033` | validated |
+| `destCode` | `JD00` | per item |
+| `status` | `PENDING` | `PENDING / RECEIVED / FORWARDED / BLOCKED / NOT_FOUND / FAILED` |
 | `attempts` | `1` | |
-| `message` | `not yet received by OMD-Finance Signatory` | last error text |
-| `source` | `phone-ocr` | `phone-ocr / phone-manual / desk / qr` |
-| `scannedBy`, `scannedAt`, `updatedAt` | | |
+| `message` | `not yet received by Pre-Audit` | last error |
+| `source` | `phone-ocr` | `desk / phone-manual / phone-ocr / qr` |
+| `scannedBy`, `scannedAt`, `updatedAt` | | `scannedBy` = Workspace email |
 
-**Log**: append-only, one row per DTMS action (`ts, batchId, pcn, step, result, station, detail`). This is the audit trail.
+**Log**: append-only (`ts, batchId, pcn, step, result, station, detail`).
+**Stations**: `code, label`.
 
-**Stations**: `code, label`, copied once from the `ilocate` options (`ACC`, `JE05`, `TR3`, …) to fill the scanner's destination picker.
+**Data minimisation**: PC No., destination and status only. No payee names, amounts or TINs go to Google. The desk panel shows those from DTMS, on the LAN.
 
-**Data minimisation.** Store the PC No. and status only, never payee names, amounts or TINs. The Sheet doesn't need them, and keeping them out avoids Data Privacy Act exposure. The desktop panel can show payee and amount from DTMS itself, since that data never leaves the LAN.
+## 7. Apps Script web app and access (DAP Workspace)
 
-## 7. Apps Script web app API
+**API**
 
 | Call | Purpose |
 |---|---|
-| `POST {op:"enqueue", items:[…], token}` | Phone adds scans (dedupes on `pcn` + open status) |
-| `GET ?op=pending&batchId=…&token=…` | Bookmarklet pulls work |
-| `POST {op:"report", results:[…], token}` | Bookmarklet writes statuses and log rows |
-| `GET ?op=stations` | Destination list |
+| `enqueue(items)` | Phone or desk adds items (dedupes on `pcn` + open status) |
+| `pending(batchId?)` | Bookmarklet pulls work |
+| `report(results)` | Bookmarklet writes statuses + log rows |
+| `stations()` / `setStations(list)` | Destination list (the bookmarklet uploads it from DTMS) |
 
-- POST bodies are sent as `Content-Type: text/plain` JSON. This avoids a CORS preflight, which Apps Script can't answer. GETs return JSON, with a JSONP `callback=` fallback in case `fetch` is blocked.
-- Deployed as *Execute as: me*. Access is decided in §10. A shared `token` in Script Properties keeps random callers out.
-- `LockService` around writes, so a phone and the desk can write at the same time safely.
+`LockService` wraps writes so the phone and the desk can write at the same time.
+
+**Access, and the catch.** Deploy as *Execute as: me · Who has access: anyone within DAP*. That works well for the **phone scanner page**: it opens on `script.google.com` while signed in to Workspace, and `google.script.run` handles authentication.
+
+The **bookmarklet** is different. It runs on `192.168.1.220`, and browsers increasingly refuse to send Google login cookies on cross-site `fetch` calls, so a domain-restricted web app would redirect it to a login page. Options, in order of preference:
+
+1. **Popup bridge.** The bookmarklet opens a small web-app window (first-party, so you're signed in) and exchanges data with it via `postMessage`. Keeps "DAP only" access. *Needs a spike* to confirm `postMessage` works through Apps Script's sandbox iframe.
+2. **Separate "Anyone" deployment** with a secret token for the bookmarklet's endpoints only. Simple and reliable, but your Workspace admin may have disabled "Anyone" access. The Sheet holds only PC Nos. and statuses.
+3. **No live link.** The bookmarklet imports and exports via the clipboard (copy pending as text, paste results). Always works and is clunkier.
 
 ## 8. Phases
 
-| Phase | Deliverable | Needs Google? | Value |
-|---|---|---|---|
-| **0. Spike** | Console snippets that (a) map PCN→checkbox on task=41, (b) do one search+update POST on task=3 for a test item, (c) capture the success and error HTML | No | Proves the `fetch` replay approach on the real system |
-| **1. Desk panel** | Bookmarklet: paste or type PC Nos. → dry-run table → Receive → Forward → retry → summary, plus a CSV log download | No | Removes most of the clicking right away |
-| **2. Queue** | Sheet + Apps Script API; the panel pulls the queue and reports back | Yes | Audit log; groundwork for the phone |
-| **3. Phone scanner** | GitHub Pages scanner: OCR + confirm + destination picker → enqueue | Yes | Scan at the desk while the PC runs the batch |
-| **4. (optional) QR** | Userscript for the DV page that adds a QR beside the PC No. before printing | — | Only if Accounting adopts it |
+| Phase | Deliverable | Needs Google? |
+|---|---|---|
+| **0. Probe** | Read-only console snippet: parses the task=41 list and the pre-check page for 1–2 PC Nos., and prints what the tool *would* do. Confirms the parsers against live pages. | No |
+| **1. Desk panel** | Bookmarklet: paste `PCN [DEST]` lines → dry-run table → Run (receive → forward → retry) → summary + CSV log | No |
+| **2. Queue** | Sheet + Apps Script; the panel pulls and reports (bridge per §7) | Yes |
+| **3. Phone scanner** | Web app page: sticky destination, manual entry, OCR + confirm | Yes |
+| **4. (optional) QR** | DV-page script that adds a QR beside the PC No. | Accounting buy-in |
 
-**Bookmarklet delivery.** Use a short *loader* bookmarklet that adds `<script src="https://<user>.github.io/…/dtms-tool.js">`. Then updates don't need re-bookmarking. If IT prefers no remote code, ship one self-contained bookmarklet instead (bigger, updated by hand).
+**Bookmarklet delivery**: a short *loader* bookmarklet that adds the hosted `dtms-tool.js`, so updates need no re-bookmarking. A fully self-contained bookmarklet is the fallback.
 
-## 9. Risks / spikes
+## 9. Remaining risks / spikes
 
-1. **Success page unknown**: we need the HTML DTMS returns after `YES!` and after `Update Location` to tell success apart.
-2. **When the "not yet received" error appears**: on `Search` (as the screenshot suggests) or only on `Update Location`? The parser handles both, but we need to know where to look.
-3. **OCR accuracy** on photocopied or crumpled vouchers: test Tesseract.js with a digit whitelist on about 20 real photos. If it falls short, the fallback is manual entry plus QR.
-4. **Camera inside Apps Script HtmlService** on your phones: test it. If it fails, use GitHub Pages hosting.
-5. **Session timeout** in the middle of a batch: detect the login page and stop cleanly. Resume skips completed items.
-6. **Policy**: this automates an official records system. Get a quick OK from the DTMS system administrator. The tool only does what your account can already do, at human pace, with a full log, which makes that conversation easier.
+1. **Receive success page.** Phase 1 verifies receipts by re-reading the list, so the exact HTML after `YES!` isn't required. A saved copy would still help.
+2. **Is an item at "OMD-Finance Signatory (Not yet Received)" in *our* task=41 list?** The design assumes yes, since it's the same station. The probe confirms it.
+3. **Popup bridge** (§7 option 1). Spike in Phase 2.
+4. **OCR accuracy** on worn or photocopied DVs. Test on about 20 real vouchers in Phase 3. Manual entry and Live Text/Lens are the fallback.
+5. **Session timeout** mid-batch. Detect the login page and stop. A rerun skips items already done (pre-check).
 
-## 10. Open questions for you
+## 10. Resolved decisions (2026-10-27)
 
-1. **Destination**: is it usually one station per batch (e.g. everything to `JE05` OMD-Finance Signatory), or does it vary per voucher?
-2. **Sample pages**: can you save the HTML after a successful `YES!` receive, after a successful `Update Location`, and the DTMS login page?
-3. **Error timing**: does the "not yet received" message appear right after `Search`, or after `Update Location`?
-4. **The screenshot case** says *"not yet received by OMD-Finance **Signatory**"* while you are *OMD-Finance **Department***. Do you also operate the Signatory station, for example by switching login? Or is that the case where someone else must receive it, and the tool should just flag it?
-5. **Google Workspace**: is DAP on Google Workspace (so the web app can be limited to your domain), or a personal Gmail account?
-6. **Phones**: Android, iPhone, or both?
-7. **Scope of v1**: receive + forward only, or also "close transaction" / forward-back-to-requestor with a reason?
+| Question | Answer |
+|---|---|
+| Destination per batch or per voucher? | **Per voucher.** Sticky picker + per-line override. |
+| Success page | Shared. Verify via `Last Location` + trailing selected option. |
+| When the "not yet received" error appears | **After `Update Location`.** Search is optional; the pre-check GET catches the case early. |
+| OMD-Finance Signatory vs Department | **Same station.** Alias list. |
+| Google account | **DAP Workspace** |
+| Phones | **Android and iPhone** |
+| Admin approval | **Yes**, front-end automation only |
+
+## 11. Still open
+
+- Phase 2 access route (§7): is "Anyone" access allowed for web apps in DAP's Workspace? If you don't know, we spike the popup bridge first.
+- Sample HTML of the DTMS **login / session-expired** page, so the tool can recognise it.
