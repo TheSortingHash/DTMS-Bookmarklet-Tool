@@ -3,7 +3,7 @@
 Batch **receive** and **forward** for DAP's Document Tracking and Monitoring System (`http://192.168.1.220/dtms/`).
 Type, scan or paste a stack of PC Nos., each with its destination station. The tool ticks and receives them, forwards each one, and retries any that DTMS says are "not yet received".
 
-It runs entirely in your browser, on the DTMS page and under your existing login. Nothing leaves the office network. See [PLAN.md](PLAN.md) for the design and the roadmap (Google Sheet queue, phone scanner).
+It runs in your browser, on the DTMS page and under your existing login. Optionally it connects to a **Google Sheet queue** that stores pending vouchers and an audit log (PC Nos., station codes and statuses only). See [PLAN.md](PLAN.md) for the design and roadmap.
 
 ## Install
 
@@ -53,22 +53,38 @@ If your DTMS session expires, the tool stops and says so. Log in, click the book
 - Send more than one request at a time. There's a 300 ms gap between requests, adjustable under *Settings*.
 
 ### Settings
-*Settings → station names that mean "us"* defaults to `OMD-Finance Department` and `OMD-Finance Signatory`. Settings are stored in this browser only.
+- *Station names that mean "us"*: defaults to `OMD-Finance Department` and `OMD-Finance Signatory`.
+- *Google Sheet queue*: the web app URL and API token (see below).
+
+Settings are stored in this browser only.
+
+## Google Sheet queue (Phase 2)
+
+Setup and deployment steps: [apps-script/README.md](apps-script/README.md). Once connected:
+
+- **Load queue** adds pending vouchers from the Sheet to the box, each with its destination.
+- After every **Run**, results and the action log are saved to the Sheet. If that fails, DTMS is already updated; click **Sync to Sheet** to retry.
+- PC Nos. typed at the desk are recorded too (`source = desk`).
+- To retry a blocked voucher, select its row in the Sheet → *DTMS Batch → Re-queue selected rows*.
 
 ## Development
 
 ```
 npm install
-npm test          # parser + batch-flow tests against fixtures of the real DTMS pages (jsdom)
+npm test          # DTMS parser/batch-flow tests (jsdom) + Apps Script tests (Code.gs under fake Google services)
 npm run build     # writes dist/ (commit it: dist/install.html is what users install)
-npm run e2e       # builds, then runs the bookmarklet in Chromium against a fake DTMS (needs playwright)
+npm run e2e       # builds, then runs the bookmarklet in Chromium against a fake DTMS and a
+                  # cross-origin fake Apps Script endpoint (needs playwright)
 ```
 
 | Path | What |
 |---|---|
 | `src/core.js` | Page parsers, form serializer, check/receive/forward/run. No UI. |
 | `src/panel.js` | The injected panel (shadow DOM, so DTMS's CSS can't touch it). |
+| `src/queue.js` | Client for the Apps Script queue API. |
 | `src/probe.js` | Phase 0 read-only console probe. |
+| `apps-script/` | Sheet-bound Apps Script (`Code.gs`, manifest) and its setup guide. |
+| `test/gas-fakes.js` | In-memory SpreadsheetApp/PropertiesService/… so `Code.gs` runs under Node. |
 | `test/fixtures.js` | DTMS page templates, trimmed from pages captured 2026-10-27. |
 | `test/fake-dtms.js` | Stateful fake DTMS used by tests. |
 | `scripts/build.js` | Bundles `src/` into `dist/`. |

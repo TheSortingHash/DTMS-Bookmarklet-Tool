@@ -1,4 +1,4 @@
-/* DTMS Batch v0.1.0 (built 2026-10-27) */
+/* DTMS Batch v0.2.0 (built 2026-10-27) */
 /*
  * DTMS core: reads DTMS pages and runs receive/forward batches.
  * No UI here. Runs in the browser (same origin as DTMS) and under Node for tests.
@@ -470,6 +470,69 @@
 })(typeof window !== 'undefined' ? window : this);
 
 /*
+ * DTMS queue client: talks to the Apps Script web app (apps-script/Code.gs).
+ * Every call is a POST with a text/plain JSON body (a "simple" request, so no
+ * CORS preflight). Apps Script answers with a redirect to googleusercontent.com,
+ * which fetch follows and which allows any origin.
+ */
+(function (root) {
+  'use strict';
+
+  function createQueueClient(url, token, fetchImpl) {
+    var doFetch = fetchImpl || (typeof fetch !== 'undefined' ? fetch.bind(root) : null);
+
+    async function call(op, payload) {
+      var res;
+      try {
+        res = await doFetch(url, {
+          method: 'POST', redirect: 'follow', credentials: 'omit', cache: 'no-store',
+          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+          body: JSON.stringify(Object.assign({ op: op, token: token }, payload || {}))
+        });
+      } catch (e) {
+        throw new Error('Could not reach the queue web app (' + (e && e.message || e) + '). Check the URL in Settings.');
+      }
+      if (!res.ok) throw new Error('Queue web app answered HTTP ' + res.status);
+      var text = await res.text(), data;
+      try { data = JSON.parse(text); } catch (e) {
+        throw new Error('Queue web app did not return JSON. Is it deployed with "Who has access: Anyone"?');
+      }
+      if (!data.ok) throw new Error('Queue: ' + data.error);
+      return data;
+    }
+
+    return {
+      ping: function () { return call('ping'); },
+      pending: function (batchId) { return call('pending', { batchId: batchId || '' }); },
+      enqueue: function (items) { return call('enqueue', { items: items }); },
+      report: function (report) { return call('report', report); },
+      setStations: function (stations) { return call('setStations', { stations: stations }); }
+    };
+  }
+
+  // What the Sheet gets after a run: statuses and the action log, never payee or amount.
+  function buildReport(station, items, logRows) {
+    return {
+      station: station || '',
+      // Desk-typed items that never started stay out of the Sheet.
+      results: items.filter(function (it) { return it.queueId || it.status !== 'PENDING'; }).map(function (it) {
+        return {
+          id: it.queueId || '', batchId: it.batchId || '', pcn: it.pcn, destCode: it.dest,
+          status: it.status, message: it.message || '', attempts: it.attempts || 0
+        };
+      }),
+      log: (logRows || []).map(function (r) {
+        return { ts: r.ts, station: r.station, pcn: r.pcn, step: r.step, result: r.result, detail: r.detail };
+      })
+    };
+  }
+
+  var api = { createQueueClient: createQueueClient, buildReport: buildReport };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  else root.DTMSQueue = api;
+})(typeof window !== 'undefined' ? window : this);
+
+/*
  * DTMS Batch panel: injected into a DTMS page by the bookmarklet.
  * Paste or type PC Nos. -> Check (read-only) -> Run (receive, forward, retry).
  * Uses DTMSCore (src/core.js), bundled ahead of this file.
@@ -478,6 +541,7 @@
   'use strict';
 
   var core = window.DTMSCore;
+  var queueApi = window.DTMSQueue;
   var HOST_ID = 'dtms-batch-panel';
   var SETTINGS_KEY = 'dtmsBatch.settings';
 
@@ -496,7 +560,7 @@
   // ---------- settings (per browser, convenience only) ----------
 
   function loadSettings() {
-    var s = { aliases: core.DEFAULT_ALIASES.slice(), delayMs: 300, defaultDest: '' };
+    var s = { aliases: core.DEFAULT_ALIASES.slice(), delayMs: 300, defaultDest: '', queueUrl: '', queueToken: '' };
     try { Object.assign(s, JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')); } catch (e) { /* private mode */ }
     return s;
   }
@@ -546,7 +610,8 @@
     ' <div class="hd"><b>DTMS Batch</b><span class="st" id="st"></span>',
     '  <button id="min" title="Hide (click the bookmarklet again to show)">–</button></div>',
     ' <div class="bd">',
-    '  <div class="row"><label>Default destination <select id="dest"></select></label></div>',
+    '  <div class="row"><label>Default destination <select id="dest"></select></label>',
+    '   <button class="b" id="loadq" hidden title="Add pending items from the Google Sheet queue">Load queue</button></div>',
     '  <textarea id="inp" spellcheck="false" placeholder="One PC No. per line, optionally followed by a station code:\n20261021033 JD00\n20261021037          (uses the default destination)\n\nCtrl+Enter = Check"></textarea>',
     '  <div class="row">',
     '   <button class="b" id="check">Check (read-only)</button>',
@@ -561,13 +626,17 @@
     '   <button class="b" id="csv">Download results CSV</button>',
     '   <button class="b" id="logcsv">Download log CSV</button>',
     '   <button class="b" id="reload">Reload DTMS page</button>',
+    '   <button class="b pri" id="sync" hidden>Sync to Sheet</button>',
     '  </div>',
     '  <details><summary>Log</summary><pre id="log"></pre></details>',
     '  <details><summary>Settings</summary>',
     '   <div class="hint">Station names that mean <i>us</i> (one per line). "Not yet received by" any of these is fixed by receiving.</div>',
     '   <textarea id="aliases" style="min-height:48px"></textarea>',
-    '   <div class="row"><label>Delay between requests (ms) <input id="delay" type="number" min="0" step="50" style="width:80px"></label>',
-    '   <button class="b" id="save">Save settings</button></div>',
+    '   <div class="row"><label>Delay between requests (ms) <input id="delay" type="number" min="0" step="50" style="width:80px"></label></div>',
+    '   <div class="hint">Google Sheet queue (optional): the web app URL and API token from the Sheet\'s <i>DTMS Batch → Set up</i> menu.</div>',
+    '   <div class="row"><input id="qurl" placeholder="https://script.google.com/macros/s/…/exec" style="flex:1"></div>',
+    '   <div class="row"><input id="qtoken" type="password" placeholder="API token" style="flex:1" autocomplete="off"></div>',
+    '   <div class="row"><button class="b" id="save">Save settings</button><button class="b" id="qtest">Test queue connection</button></div>',
     '  </details>',
     ' </div>',
     '</div>'
@@ -577,13 +646,16 @@
   var el = {
     st: $('st'), dest: $('dest'), inp: $('inp'), check: $('check'), run: $('run'), stop: $('stop'),
     sum: $('sum'), msg: $('msg'), tblwrap: $('tblwrap'), tb: $('tb'), after: $('after'), csv: $('csv'),
-    logcsv: $('logcsv'), reload: $('reload'), log: $('log'), aliases: $('aliases'), delay: $('delay'), save: $('save')
+    logcsv: $('logcsv'), reload: $('reload'), log: $('log'), aliases: $('aliases'), delay: $('delay'), save: $('save'),
+    loadq: $('loadq'), sync: $('sync'), qurl: $('qurl'), qtoken: $('qtoken'), qtest: $('qtest')
   };
 
   var station = core.parseStation(document) || '?';
   el.st.textContent = 'Station: ' + station;
   el.aliases.value = settings.aliases.join('\n');
   el.delay.value = settings.delayMs;
+  el.qurl.value = settings.queueUrl;
+  el.qtoken.value = settings.queueToken;
 
   var stations = core.DEFAULT_STATIONS;
   function fillStations(list) {
@@ -605,6 +677,17 @@
   // ---------- state ----------
 
   var items = [], ctx = null, checkedKey = null, running = false, stopRequested = false;
+  var queued = {};            // pcn -> { id, batchId } for items loaded from the Sheet
+  var pendingReport = null;   // a report the Sheet hasn't accepted yet
+  var stationsSynced = false;
+  var syncErrorMsg = null;
+
+  function queue() {
+    return settings.queueUrl && settings.queueToken
+      ? queueApi.createQueueClient(settings.queueUrl, settings.queueToken) : null;
+  }
+  function showQueueUi() { el.loadq.hidden = !queue(); }
+  showQueueUi();
 
   function inputKey() { return el.dest.value + '\u0000' + el.inp.value; }
 
@@ -615,6 +698,14 @@
     d.className = 'msg ' + kind;
     d.textContent = text;
     el.msg.appendChild(d);
+  }
+
+  function addMsg(kind, text) {
+    var d = document.createElement('div');
+    d.className = 'msg ' + kind;
+    d.textContent = text;
+    el.msg.appendChild(d);
+    return d;
   }
 
   function labelOf(code) {
@@ -677,6 +768,8 @@
     el.stop.disabled = !on;
     el.inp.disabled = on;
     el.dest.disabled = on;
+    el.loadq.disabled = on;
+    el.sync.disabled = on;
   }
 
   function canRun() {
@@ -717,6 +810,10 @@
       items = []; render(); return;
     }
     items = parsed.items;
+    items.forEach(function (it) {
+      var q = queued[it.pcn];
+      if (q) { it.queueId = q.id; it.batchId = q.batchId; }
+    });
     stopRequested = false;
     ctx = newCtx();
     el.log.textContent = '';
@@ -731,6 +828,7 @@
         setMsg(n ? 'info' : 'ok', n ? 'Check done. Nothing was changed in DTMS. Review the plan, then click Run.' : 'Nothing to do.');
       }
       el.after.hidden = false;
+      uploadStations();
     } catch (e) {
       handleError(e);
       checkedKey = null;
@@ -757,9 +855,68 @@
       handleError(e);
     } finally {
       checkedKey = null; // require a fresh Check before running again
+      if (queue()) pendingReport = queueApi.buildReport(ctx.station || station, items, ctx.logRows);
       setBusy(false);
       render();
     }
+    if (pendingReport) await syncReport();
+  }
+
+  async function syncReport() {
+    var q = queue();
+    if (!q || !pendingReport) return;
+    el.sync.disabled = true;
+    try {
+      var r = await q.report(pendingReport);
+      pendingReport.results.forEach(function (res) {
+        if (core.TERMINAL[res.status]) delete queued[res.pcn];
+      });
+      pendingReport = null;
+      el.sync.hidden = true;
+      if (syncErrorMsg) { syncErrorMsg.remove(); syncErrorMsg = null; }
+      addMsg('ok', 'Saved to the Sheet: ' + r.updated + ' updated, ' + r.added + ' added, ' + r.logged + ' log rows.' +
+        (r.errors && r.errors.length ? ' Rejected: ' + r.errors.map(function (x) { return x.pcn + ' (' + x.error + ')'; }).join(', ') : ''));
+    } catch (e) {
+      el.sync.hidden = false;
+      el.sync.disabled = false;
+      if (syncErrorMsg) syncErrorMsg.remove();
+      syncErrorMsg = addMsg('err', 'Could not save to the Sheet: ' + e.message + '\nDTMS is already updated. Click "Sync to Sheet" to try again (keep this panel open).');
+    }
+  }
+
+  async function loadQueue() {
+    var q = queue();
+    if (!q || running) return;
+    el.loadq.disabled = true;
+    try {
+      var data = await q.pending();
+      var present = {};
+      core.parseInput(el.inp.value, el.dest.value || 'X', stations).items.forEach(function (it) { present[it.pcn] = true; });
+      var lines = [], skipped = 0;
+      data.items.forEach(function (it) {
+        queued[it.pcn] = { id: it.id, batchId: it.batchId };
+        if (present[it.pcn]) { skipped++; return; }
+        present[it.pcn] = true;
+        lines.push(it.pcn + ' ' + it.destCode);
+      });
+      if (lines.length) el.inp.value = el.inp.value.replace(/\s*$/, '') + (el.inp.value.trim() ? '\n' : '') + lines.join('\n') + '\n';
+      setMsg('info', data.items.length
+        ? 'Loaded ' + lines.length + ' item(s) from the queue' + (skipped ? ' (' + skipped + ' already listed)' : '') + '. Click Check.'
+        : 'The queue has no pending items.');
+      el.run.disabled = running || !canRun();
+    } catch (e) {
+      setMsg('err', e.message);
+    } finally {
+      el.loadq.disabled = false;
+    }
+  }
+
+  function uploadStations() {
+    var q = queue();
+    if (!q || stationsSynced || !ctx || !ctx.stations) return;
+    q.setStations(ctx.stations).then(function () { stationsSynced = true; }, function (e) {
+      appendLog({ ts: new Date().toISOString(), pcn: '', step: 'queue', result: 'WARN', detail: 'Station list not uploaded: ' + e.message });
+    });
   }
 
   function download(name, text) {
@@ -774,6 +931,15 @@
   function stamp() { return new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-'); }
 
   el.check.addEventListener('click', doCheck);
+  el.loadq.addEventListener('click', loadQueue);
+  el.sync.addEventListener('click', syncReport);
+  el.qtest.addEventListener('click', function () {
+    var url = el.qurl.value.trim(), token = el.qtoken.value.trim();
+    if (!url || !token) { setMsg('err', 'Enter both the web app URL and the token.'); return; }
+    queueApi.createQueueClient(url, token).ping().then(function (r) {
+      setMsg('ok', 'Queue reachable (web app v' + r.version + '). Click Save settings to keep it.');
+    }, function (e) { setMsg('err', e.message); });
+  });
   el.run.addEventListener('click', doRun);
   el.stop.addEventListener('click', function () { stopRequested = true; el.stop.disabled = true; });
   el.inp.addEventListener('keydown', function (e) { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doCheck(); } });
@@ -800,12 +966,19 @@
   el.save.addEventListener('click', function () {
     settings.aliases = el.aliases.value.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean);
     settings.delayMs = Math.max(0, Number(el.delay.value) || 0);
+    settings.queueUrl = el.qurl.value.trim();
+    settings.queueToken = el.qtoken.value.trim();
+    if (settings.queueUrl && !/^(https:\/\/script\.google(usercontent)?\.com\/|http:\/\/(localhost|127\.0\.0\.1)[:/])/.test(settings.queueUrl)) {
+      setMsg('err', 'The queue URL should start with https://script.google.com/');
+      return;
+    }
     saveSettings();
+    showQueueUi();
     setMsg('ok', 'Settings saved for this browser.');
   });
 
   window.addEventListener('beforeunload', function (e) {
-    if (running) { e.preventDefault(); e.returnValue = ''; }
+    if (running || pendingReport) { e.preventDefault(); e.returnValue = ''; }
   });
 
   el.inp.focus();

@@ -1,4 +1,4 @@
-/* DTMS Batch v0.1.0 (built 2026-10-27) */
+/* DTMS Batch v0.2.0 (built 2026-10-27) */
 /*
  * DTMS core: reads DTMS pages and runs receive/forward batches.
  * No UI here. Runs in the browser (same origin as DTMS) and under Node for tests.

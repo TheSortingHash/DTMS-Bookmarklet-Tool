@@ -1,6 +1,6 @@
 # DTMS Batch Receive & Forward Tool — Plan
 
-Status: **v3**. Phases 0 and 1 are built and tested against fixtures of the real DTMS pages, awaiting a live trial.
+Status: **v4**. Phases 0–1 are built and confirmed working on live DTMS (2026-10-27). Phase 2 (Sheet queue) is built and tested, awaiting deployment.
 The DTMS system administrator has approved front-end automation.
 
 ## 1. Problem
@@ -194,9 +194,9 @@ The popup bridge (bookmarklet opens a web-app window and talks to it via `postMe
 
 | Phase | Deliverable | Needs Google? |
 |---|---|---|
-| **0. Probe** ✅ built | Read-only console snippet (`dist/probe-console.js`): parses the task=41 list and the pre-check page for the PC Nos. you enter, and prints what the tool *would* do. Confirms the parsers against live pages. | No |
-| **1. Desk panel** ✅ built | Bookmarklet (`dist/install.html`): paste `PCN [DEST]` lines → Check table → Run (receive → forward → retry) → summary + CSV log | No |
-| **2. Queue** | Sheet + Apps Script; the panel pulls and reports (API deployment per §7) | Yes |
+| **0. Probe** ✅ live | Read-only console snippet (`dist/probe-console.js`): parses the task=41 list and the pre-check page for the PC Nos. you enter, and prints what the tool *would* do. Confirms the parsers against live pages. | No |
+| **1. Desk panel** ✅ live | Bookmarklet (`dist/install.html`): paste `PCN [DEST]` lines → Check table → Run (receive → forward → retry) → summary + CSV log | No |
+| **2. Queue** ✅ built | `apps-script/Code.gs`: Queue/Log/Stations tabs, token API, re-queue menu. Panel: Load queue, auto-sync after Run, Sync retry. See `apps-script/README.md`. | Yes |
 | **3. Phone scanner** | Web app page: sticky destination, manual entry, OCR + confirm | Yes |
 | **4. (optional) QR** | DV-page script that adds a QR beside the PC No. | Accounting buy-in |
 
@@ -226,5 +226,5 @@ The popup bridge (bookmarklet opens a web-app window and talks to it via `postMe
 
 ## 11. Next
 
-- **Live trial of Phase 0, then Phase 1**, on a handful of real vouchers (see README).
-- Then Phase 2 (Sheet + Apps Script queue).
+- Deploy Phase 2 (`apps-script/README.md`) and run one batch through Load queue → Run → Sheet.
+- Then Phase 3: the phone scanner page (DAP-only deployment, `google.script.run` → the same `enqueue_`).
