@@ -1,14 +1,16 @@
 {
   "name": "dtms-bookmarklet-tool",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
   "description": "Batch receive and forward for the DAP Document Tracking and Monitoring System",
   "scripts": {
     "test": "node --test test/*.test.js",
     "build": "node scripts/build.js",
-    "e2e": "node scripts/build.js && node test/browser.e2e.js && node test/queue.e2e.js"
+    "e2e": "node scripts/build.js && node test/browser.e2e.js && node test/queue.e2e.js && node test/scanner.e2e.js"
   },
   "devDependencies": {
-    "jsdom": "^24.1.3"
+    "@tesseract.js-data/eng": "^1.0.0",
+    "jsdom": "^24.1.3",
+    "tesseract.js": "^5.1.1"
   }
 }

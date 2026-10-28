@@ -69,7 +69,7 @@ class FakeSheet {
   }
 }
 
-function loadGas({ activeUser = 'staff@example.com' } = {}) {
+function loadGas({ activeUser = 'staff@example.com', owner = 'owner@example.com' } = {}) {
   const sheets = new Map();
   const ss = {
     getId: () => 'sheet-id',
@@ -108,7 +108,18 @@ function loadGas({ activeUser = 'staff@example.com' } = {}) {
       MimeType: { JSON: 'application/json' },
       createTextOutput: s => ({ setMimeType() { return this; }, getContent: () => s })
     },
-    Session: { getActiveUser: () => ({ getEmail: () => activeUser }) },
+    Session: {
+      getActiveUser: () => ({ getEmail: () => activeUser }),
+      getEffectiveUser: () => ({ getEmail: () => owner })
+    },
+    HtmlService: {
+      createHtmlOutputFromFile: name => {
+        const out = { file: name, title: '', meta: {} };
+        out.setTitle = t => { out.title = t; return out; };
+        out.addMetaTag = (k, v) => { out.meta[k] = v; return out; };
+        return out;
+      }
+    },
     Logger: { log() {} },
     Date, JSON, Math, String, Number, Array, Object, Error
   };
@@ -119,7 +130,9 @@ function loadGas({ activeUser = 'staff@example.com' } = {}) {
   const post = body => JSON.parse(ctx.doPost({ postData: { contents: typeof body === 'string' ? body : JSON.stringify(body) } }).getContent());
   const token = () => props.get('API_TOKEN');
   const setActiveRange = r => { activeRange = r; };
-  return { gas: ctx, ss, sheets, props, post, token, setActiveRange };
+  // Switches who is "signed in" for google.script.run-style calls.
+  const signIn = email => { activeUser = email; };
+  return { gas: ctx, ss, sheets, props, post, token, setActiveRange, signIn };
 }
 
 module.exports = { loadGas, FakeSheet };

@@ -1,5 +1,5 @@
 /**
- * DTMS Batch: queue API (Phase 2).
+ * DTMS Batch: queue API (Phase 2) and phone/desktop scanner page (Phase 3).
  *
  * Bound to the "DTMS Batch" Google Sheet. The Sheet is the queue and the audit log:
  *   Queue     one row per voucher to process (PC No. + destination + status)
@@ -10,15 +10,21 @@
  * shared token. This deployment must be "Execute as: Me" and "Who has access:
  * Anyone". Only PC Nos., station codes and statuses are stored; no payee
  * names or amounts.
+ *
+ * The scanner page (Scanner.html, served by doGet) is a second deployment of
+ * this same script: "Execute as: Me", "Who has access: Anyone within DAP".
+ * Its server functions (scanner*) require a signed-in account in the
+ * deployer's Workspace domain, so the page is useless on the "Anyone" API
+ * deployment.
  */
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 
 const TABLES = {
   queue: {
     name: 'Queue',
     headers: ['id', 'batchId', 'pcn', 'destCode', 'destLabel', 'status', 'attempts', 'message',
-      'source', 'scannedBy', 'scannedAt', 'updatedAt', 'processedBy'],
+      'source', 'scannedBy', 'scannedAt', 'updatedAt', 'processedBy', 'deskStation'],
     // Kept as text so Sheets never turns a PC No. into 2.03E+10 or a batch id into a date.
     textColumns: ['id', 'batchId', 'pcn', 'destCode', 'destLabel']
   },
@@ -46,6 +52,7 @@ function onOpen() {
   SpreadsheetApp.getUi().createMenu('DTMS Batch')
     .addItem('Set up / show API token', 'setup')
     .addItem('Re-queue selected rows', 'requeueSelected')
+    .addItem('Set desk API web app URL…', 'setApiUrl')
     .addSeparator()
     .addItem('Rotate API token', 'rotateToken')
     .addToUi();
@@ -72,6 +79,18 @@ function setup() {
 
   if (!props.getProperty('API_TOKEN')) props.setProperty('API_TOKEN', newToken_());
   showToken_('DTMS Batch is set up.');
+}
+
+/** Stores the "Anyone" deployment URL so the scanner page can show it to staff setting up a desk. */
+function setApiUrl() {
+  const ui = SpreadsheetApp.getUi();
+  const r = ui.prompt('Desk API web app URL',
+    'Paste the URL of the deployment with "Who has access: Anyone" (ends in /exec):', ui.ButtonSet.OK_CANCEL);
+  if (r.getSelectedButton() !== ui.Button.OK) return;
+  const url = r.getResponseText().trim();
+  if (!/^https:\/\/script\.google\.com\/.+\/exec$/.test(url)) { ui.alert('That does not look like a web app URL.'); return; }
+  PropertiesService.getScriptProperties().setProperty('API_URL', url);
+  ui.alert('Saved. Staff can now copy it from the scanner page under "Set up the desk panel".');
 }
 
 function rotateToken() {
@@ -103,8 +122,11 @@ function requeueSelected() {
 
 // ---------- HTTP ----------
 
-function doGet() {
-  return json_({ ok: true, service: 'dtms-batch', version: VERSION });
+function doGet(e) {
+  if (e && e.parameter && e.parameter.ping) return json_({ ok: true, service: 'dtms-batch', version: VERSION });
+  return HtmlService.createHtmlOutputFromFile('Scanner')
+    .setTitle('DTMS Scan')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
 
 function doPost(e) {
@@ -125,26 +147,31 @@ function doPost(e) {
 function handle_(req) {
   switch (req.op) {
     case 'ping': return { ok: true, version: VERSION };
-    case 'pending': return pending_(req.batchId);
+    case 'pending': return pending_(req.batchId, req.desk);
     case 'enqueue': return withLock_(function () { return enqueue_(req.items, req.user || '', 'desk'); });
     case 'report': return withLock_(function () { return report_(req); });
-    case 'setStations': return withLock_(function () { return setStations_(req.stations); });
+    case 'setStations': return withLock_(function () { registerDesk_(req.desk); return setStations_(req.stations); });
     default: throw new Error('Unknown op: ' + req.op);
   }
 }
 
 // ---------- operations ----------
 
-function pending_(batchId) {
+/** Open rows, oldest scan first. With `desk`, only rows for that desk (or for no particular desk). */
+function pending_(batchId, desk) {
+  const want = String(desk || '').toLowerCase();
   const items = readTable_('queue').rows
-    .filter(function (r) { return OPEN[r.obj.status] && r.obj.pcn && (!batchId || r.obj.batchId === batchId); })
+    .filter(function (r) {
+      const d = String(r.obj.deskStation || '').toLowerCase();
+      return OPEN[r.obj.status] && r.obj.pcn && (!batchId || r.obj.batchId === batchId) && (!want || !d || d === want);
+    })
     .sort(function (a, b) { return time_(a.obj.scannedAt) - time_(b.obj.scannedAt) || a.row - b.row; })
     .map(function (r) {
       const o = r.obj;
       return {
         id: o.id, batchId: o.batchId, pcn: o.pcn, destCode: o.destCode, destLabel: o.destLabel,
         status: o.status, attempts: Number(o.attempts) || 0, source: o.source,
-        scannedBy: o.scannedBy, scannedAt: iso_(o.scannedAt)
+        scannedBy: o.scannedBy, scannedAt: iso_(o.scannedAt), deskStation: o.deskStation || ''
       };
     });
   return { ok: true, items: items };
@@ -155,7 +182,7 @@ function pending_(batchId) {
  * PC No. is updated (new destination) instead of duplicated; a PC No. whose
  * earlier row is finished gets a fresh row.
  */
-function enqueue_(items, user, defaultSource) {
+function enqueue_(items, user, defaultSource, desk) {
   if (!Array.isArray(items) || !items.length) throw new Error('No items');
   if (items.length > MAX_ITEMS) throw new Error('Too many items (max ' + MAX_ITEMS + ')');
   const table = readTable_('queue');
@@ -170,12 +197,14 @@ function enqueue_(items, user, defaultSource) {
     if (!PCN_RE.test(pcn)) { result.errors.push({ pcn: pcn, error: 'Not a valid PC No.' }); return; }
     if (!validDest_(dest, labels)) { result.errors.push({ pcn: pcn, error: 'Unknown station code ' + dest }); return; }
 
+    const forDesk = String(it.deskStation || desk || '').slice(0, 120);
     const open = findOpen_(table, pcn) || fresh.find(function (o) { return o.pcn === pcn; });
     if (open) {
       const o = open.obj || open;
-      if (o.destCode === dest) { result.duplicates.push({ pcn: pcn, id: o.id }); return; }
+      if (o.destCode === dest && (!forDesk || o.deskStation === forDesk)) { result.duplicates.push({ pcn: pcn, id: o.id }); return; }
       o.destCode = dest;
       o.destLabel = labels[dest] || '';
+      if (forDesk) o.deskStation = forDesk;
       o.updatedAt = now;
       if (open.obj) writeRow_(table, open);
       result.updated.push({ pcn: pcn, id: o.id });
@@ -185,7 +214,8 @@ function enqueue_(items, user, defaultSource) {
       id: newId_(), batchId: String(it.batchId || defaultBatch_(now)), pcn: pcn, destCode: dest,
       destLabel: labels[dest] || '', status: 'PENDING', attempts: 0, message: '',
       source: SOURCES.indexOf(it.source) >= 0 ? it.source : defaultSource,
-      scannedBy: user, scannedAt: now, updatedAt: now, processedBy: ''
+      scannedBy: user, scannedAt: now, updatedAt: now, processedBy: '',
+      deskStation: forDesk
     };
     fresh.push(row);
     result.added.push({ pcn: pcn, id: row.id });
@@ -206,6 +236,7 @@ function report_(req) {
   const logRows = Array.isArray(req.log) ? req.log : [];
   if (results.length > MAX_ITEMS || logRows.length > MAX_ITEMS * 20) throw new Error('Report too large');
 
+  registerDesk_(station);
   const table = readTable_('queue');
   const labels = stationLabels_();
   const now = new Date();
@@ -231,7 +262,7 @@ function report_(req) {
     }
     fresh.push(Object.assign({
       id: newId_(), batchId: String(r.batchId || defaultBatch_(now)), pcn: pcn, destCode: dest,
-      destLabel: labels[dest] || '', source: 'desk', scannedBy: station, scannedAt: now
+      destLabel: labels[dest] || '', source: 'desk', scannedBy: station, scannedAt: now, deskStation: station
     }, fields));
     out.added++;
   });
@@ -264,6 +295,90 @@ function setStations_(stations) {
   return { ok: true, count: clean.length };
 }
 
+// ---------- scanner page (google.script.run) ----------
+
+/** Signed-in user's email, or an error. Only accounts in the deployer's Workspace domain. */
+function requireUser_() {
+  const email = String(Session.getActiveUser().getEmail() || '').toLowerCase();
+  if (!email) throw new Error('Open this page while signed in to your DAP Google account.');
+  const allowed = String(PropertiesService.getScriptProperties().getProperty('ALLOWED_DOMAIN') ||
+    String(Session.getEffectiveUser().getEmail()).split('@')[1] || '').toLowerCase();
+  if (!allowed || email.split('@')[1] !== allowed) throw new Error('Only ' + (allowed || 'DAP') + ' accounts can use this page.');
+  return email;
+}
+
+function scannerInit() {
+  const user = requireUser_();
+  const stations = readTable_('stations').rows
+    .filter(function (r) { return r.obj.code; })
+    .map(function (r) { return { code: String(r.obj.code), label: String(r.obj.label) }; });
+  return { user: user, version: VERSION, stations: stations, desks: desks_() };
+}
+
+/** items: [{pcn, destCode, source}] for one desk. Returns enqueue_'s result. */
+function scannerEnqueue(items, desk, batchId) {
+  const user = requireUser_();
+  if (!desk) throw new Error('Choose which desk (DTMS station) will process these.');
+  return withLock_(function () {
+    return enqueue_((items || []).map(function (it) {
+      return { pcn: it.pcn, destCode: it.destCode, source: it.source, batchId: batchId };
+    }), user, 'phone-manual', desk);
+  });
+}
+
+/** Your own scans from the last 24 hours, newest first, so you can see what the desk did with them. */
+function scannerMine() {
+  const user = requireUser_();
+  const since = Date.now() - 24 * 3600e3;
+  return readTable_('queue').rows
+    .filter(function (r) { return String(r.obj.scannedBy).toLowerCase() === user && time_(r.obj.scannedAt) >= since; })
+    .sort(function (a, b) { return time_(b.obj.scannedAt) - time_(a.obj.scannedAt) || b.row - a.row; })
+    .slice(0, 100)
+    .map(function (r) {
+      const o = r.obj;
+      return { id: o.id, pcn: o.pcn, destCode: o.destCode, destLabel: o.destLabel, status: o.status,
+        message: o.message, deskStation: o.deskStation, scannedAt: iso_(o.scannedAt) };
+    });
+}
+
+/** Withdraws one of your own scans that the desk hasn't processed yet. */
+function scannerCancel(id) {
+  const user = requireUser_();
+  return withLock_(function () {
+    const table = readTable_('queue');
+    const hit = table.rows.find(function (r) { return r.obj.id === id; });
+    if (!hit || String(hit.obj.scannedBy).toLowerCase() !== user) throw new Error('Not found among your scans.');
+    if (hit.obj.status !== 'PENDING') throw new Error('Already ' + hit.obj.status.toLowerCase() + ' at the desk; cannot cancel.');
+    hit.obj.status = 'SKIPPED';
+    hit.obj.message = 'Cancelled by ' + user;
+    hit.obj.updatedAt = new Date();
+    writeRow_(table, hit);
+    return { ok: true };
+  });
+}
+
+/** What staff need to connect the desk panel on a PC: the "Anyone" API URL and the token. */
+function scannerDeskSetup() {
+  requireUser_();
+  const props = PropertiesService.getScriptProperties();
+  return { apiUrl: props.getProperty('API_URL') || '', token: props.getProperty('API_TOKEN') || '' };
+}
+
+// Desk stations seen from desk panels; fills the scanner's "For desk" list.
+function desks_() {
+  try { return JSON.parse(PropertiesService.getScriptProperties().getProperty('DESKS') || '[]'); } catch (e) { return []; }
+}
+
+function registerDesk_(name) {
+  name = String(name || '').trim().slice(0, 120);
+  if (!name) return;
+  const list = desks_();
+  if (list.some(function (d) { return d.toLowerCase() === name.toLowerCase(); })) return;
+  list.push(name);
+  list.sort();
+  PropertiesService.getScriptProperties().setProperty('DESKS', JSON.stringify(list.slice(0, 100)));
+}
+
 // ---------- table helpers ----------
 
 function sheet_(key) {
@@ -278,9 +393,14 @@ function readTable_(key, headersOnly) {
   const sh = sheet_(key);
   const want = TABLES[key].headers;
   const lastRow = sh.getLastRow();
-  const headers = lastRow ? sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String) : [];
+  if (!lastRow) throw new Error('Tab ' + TABLES[key].name + ' is empty. Run DTMS Batch → Set up in the Sheet.');
+  const headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
+  // Columns added in later versions are appended to an existing Sheet automatically.
   want.forEach(function (h) {
-    if (headers.indexOf(h) < 0) throw new Error('Column "' + h + '" missing on tab ' + TABLES[key].name);
+    if (headers.indexOf(h) < 0) {
+      sh.getRange(1, headers.length + 1, 1, 1).setValues([[h]]);
+      headers.push(h);
+    }
   });
   const rows = [];
   if (!headersOnly && lastRow > 1) {

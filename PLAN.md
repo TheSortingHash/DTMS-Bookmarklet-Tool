@@ -1,6 +1,6 @@
 # DTMS Batch Receive & Forward Tool — Plan
 
-Status: **v4**. Phases 0–1 are built and confirmed working on live DTMS (2026-10-27). Phase 2 (Sheet queue) is built and tested, awaiting deployment.
+Status: **v5**. Phases 0–2 are live. Phase 3 (DTMS Scan: typing everywhere, photo reading on phones, per-desk queues) is built and tested, awaiting deployment.
 The DTMS system administrator has approved front-end automation.
 
 ## 1. Problem
@@ -196,8 +196,8 @@ The popup bridge (bookmarklet opens a web-app window and talks to it via `postMe
 |---|---|---|
 | **0. Probe** ✅ live | Read-only console snippet (`dist/probe-console.js`): parses the task=41 list and the pre-check page for the PC Nos. you enter, and prints what the tool *would* do. Confirms the parsers against live pages. | No |
 | **1. Desk panel** ✅ live | Bookmarklet (`dist/install.html`): paste `PCN [DEST]` lines → Check table → Run (receive → forward → retry) → summary + CSV log | No |
-| **2. Queue** ✅ built | `apps-script/Code.gs`: Queue/Log/Stations tabs, token API, re-queue menu. Panel: Load queue, auto-sync after Run, Sync retry. See `apps-script/README.md`. | Yes |
-| **3. Phone scanner** | Web app page: sticky destination, manual entry, OCR + confirm | Yes |
+| **2. Queue** ✅ live | `apps-script/Code.gs`: Queue/Log/Stations tabs, token API, re-queue menu. Panel: Load queue, auto-sync after Run, Sync retry. See `apps-script/README.md`. | Yes |
+| **3. DTMS Scan** ✅ built | Apps Script page (`Scanner.html`), DAP-only deployment. Desk + sticky destination; typing everywhere (handwritten PC Nos. before a DV exists); photo → OCR → tap to confirm on phones; My scans with live status and cancel; offline outbox. Queue rows carry `deskStation`, so each desk's Load queue gets its own work. | Yes |
 | **4. (optional) QR** | DV-page script that adds a QR beside the PC No. | Accounting buy-in |
 
 **Bookmarklet delivery**: a short *loader* bookmarklet that adds the hosted `dtms-tool.js`, so updates need no re-bookmarking. A fully self-contained bookmarklet is the fallback.
@@ -226,5 +226,5 @@ The popup bridge (bookmarklet opens a web-app window and talks to it via `postMe
 
 ## 11. Next
 
-- Deploy Phase 2 (`apps-script/README.md`) and run one batch through Load queue → Run → Sheet.
-- Then Phase 3: the phone scanner page (DAP-only deployment, `google.script.run` → the same `enqueue_`).
+- Deploy Phase 3 (`apps-script/README.md` → *Updating from Phase 2*) and scan a real stack on Android and iPhone.
+- Track photo-reading accuracy on real DVs. OCR evaluation on 32 variants of the two real images we have: 29 correct first picks; misses were tiny whole-page shots and a blurred close-up, which is why the page asks for close framing and always requires a tap to confirm.

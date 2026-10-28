@@ -58,11 +58,12 @@ If your DTMS session expires, the tool stops and says so. Log in, click the book
 
 Settings are stored in this browser only.
 
-## Google Sheet queue (Phase 2)
+## Google Sheet queue and DTMS Scan (Phases 2–3)
 
-Setup and deployment steps: [apps-script/README.md](apps-script/README.md). Once connected:
+Setup and deployment steps: [apps-script/README.md](apps-script/README.md).
 
-- **Load queue** adds pending vouchers from the Sheet to the box, each with its destination.
+- **DTMS Scan** (phone or PC, DAP accounts only): pick the desk and destination, then type a PC No. or, on a phone, read it from a photo of the DV and tap to confirm. Each scan is queued for that desk.
+- **Load queue** at a desk adds the vouchers scanned *for that desk* to the box, each with its destination.
 - After every **Run**, results and the action log are saved to the Sheet. If that fails, DTMS is already updated; click **Sync to Sheet** to retry.
 - PC Nos. typed at the desk are recorded too (`source = desk`).
 - To retry a blocked voucher, select its row in the Sheet → *DTMS Batch → Re-queue selected rows*.
@@ -73,8 +74,9 @@ Setup and deployment steps: [apps-script/README.md](apps-script/README.md). Once
 npm install
 npm test          # DTMS parser/batch-flow tests (jsdom) + Apps Script tests (Code.gs under fake Google services)
 npm run build     # writes dist/ (commit it: dist/install.html is what users install)
-npm run e2e       # builds, then runs the bookmarklet in Chromium against a fake DTMS and a
-                  # cross-origin fake Apps Script endpoint (needs playwright)
+npm run e2e       # builds, then runs in Chromium: the bookmarklet against a fake DTMS; the panel
+                  # against a cross-origin fake Apps Script; DTMS Scan on an emulated iPhone with
+                  # real OCR of a rendered DV (needs playwright)
 ```
 
 | Path | What |
@@ -83,6 +85,9 @@ npm run e2e       # builds, then runs the bookmarklet in Chromium against a fake
 | `src/panel.js` | The injected panel (shadow DOM, so DTMS's CSS can't touch it). |
 | `src/queue.js` | Client for the Apps Script queue API. |
 | `src/probe.js` | Phase 0 read-only console probe. |
+| `src/scanner.html` | DTMS Scan page (built into `apps-script/Scanner.html`). |
+| `src/pcn.js` | PC No. validation and extraction from OCR text. |
+| `src/ocr-prep.js` | Photo preprocessing passes for OCR (grayscale, adaptive/Otsu thresholds). |
 | `apps-script/` | Sheet-bound Apps Script (`Code.gs`, manifest) and its setup guide. |
 | `test/gas-fakes.js` | In-memory SpreadsheetApp/PropertiesService/… so `Code.gs` runs under Node. |
 | `test/fixtures.js` | DTMS page templates, trimmed from pages captured 2026-10-27. |

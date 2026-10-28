@@ -32,10 +32,11 @@
 
     return {
       ping: function () { return call('ping'); },
-      pending: function (batchId) { return call('pending', { batchId: batchId || '' }); },
+      // desk: the DTMS station this panel runs as; the Sheet returns that desk's rows and unassigned ones.
+      pending: function (batchId, desk) { return call('pending', { batchId: batchId || '', desk: desk || '' }); },
       enqueue: function (items) { return call('enqueue', { items: items }); },
       report: function (report) { return call('report', report); },
-      setStations: function (stations) { return call('setStations', { stations: stations }); }
+      setStations: function (stations, desk) { return call('setStations', { stations: stations, desk: desk || '' }); }
     };
   }
 

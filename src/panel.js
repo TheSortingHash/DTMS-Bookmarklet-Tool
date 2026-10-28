@@ -362,7 +362,7 @@
     if (!q || running) return;
     el.loadq.disabled = true;
     try {
-      var data = await q.pending();
+      var data = await q.pending('', station);
       var present = {};
       core.parseInput(el.inp.value, el.dest.value || 'X', stations).items.forEach(function (it) { present[it.pcn] = true; });
       var lines = [], skipped = 0;
@@ -375,7 +375,7 @@
       if (lines.length) el.inp.value = el.inp.value.replace(/\s*$/, '') + (el.inp.value.trim() ? '\n' : '') + lines.join('\n') + '\n';
       setMsg('info', data.items.length
         ? 'Loaded ' + lines.length + ' item(s) from the queue' + (skipped ? ' (' + skipped + ' already listed)' : '') + '. Click Check.'
-        : 'The queue has no pending items.');
+        : 'The queue has no pending items for ' + station + '.');
       el.run.disabled = running || !canRun();
     } catch (e) {
       setMsg('err', e.message);
@@ -387,7 +387,7 @@
   function uploadStations() {
     var q = queue();
     if (!q || stationsSynced || !ctx || !ctx.stations) return;
-    q.setStations(ctx.stations).then(function () { stationsSynced = true; }, function (e) {
+    q.setStations(ctx.stations, ctx.station).then(function () { stationsSynced = true; }, function (e) {
       appendLog({ ts: new Date().toISOString(), pcn: '', step: 'queue', result: 'WARN', detail: 'Station list not uploaded: ' + e.message });
     });
   }
